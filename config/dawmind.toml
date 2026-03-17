@@ -1,0 +1,41 @@
+[general]
+name = "DAWMind"
+version = "0.1.0"
+log_level = "INFO"
+
+[fl_studio]
+pipe_name = "dawmind"
+state_poll_interval_ms = 500
+script_path = "~/Documents/Image-Line/FL Studio/Settings/Hardware/DAWMind/"
+
+[server]
+host = "127.0.0.1"
+ws_port = 9500
+api_port = 9501
+
+[llm]
+planning_model = "claude-sonnet-4-20250514"
+vision_model = "gemini-2.5-flash"
+local_model = "llama3"
+router_strategy = "auto"  # auto, force_api, force_vision
+
+[llm.anthropic]
+# key from env: ANTHROPIC_API_KEY
+
+[llm.google]
+# key from env: GOOGLE_API_KEY
+project_id = ""
+region = "europe-west1"
+
+[llm.openai]
+# key from env: OPENAI_API_KEY
+
+[vision]
+omniparser_endpoint = "http://localhost:8080/parse"
+screenshot_cache_seconds = 2.0
+capture_monitor = 0
+verification_enabled = true
+
+[voice]
+enabled = false
+whisper_model = "base"
