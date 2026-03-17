@@ -18,6 +18,10 @@ import sys
 import os
 import time
 
+print("=" * 40)
+print("DAWMind Script: Lade Python-Modul...")
+print("=" * 40)
+
 # Add the script directory to sys.path so we can import ipc_handler
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 if _script_dir not in sys.path:
