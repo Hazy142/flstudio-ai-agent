@@ -1,33 +1,15 @@
 # name=DAWMind
-# url=https://github.com/aelsen1808/flstudio-ai-agent
 #
 # FL Studio MIDI Controller Script for DAWMind.
-# This script runs inside FL Studio's Python interpreter and exposes
-# the internal API to the DAWMind bridge server via IPC.
+# AI Agent that controls FL Studio via IPC.
 #
-# Communication: File-based IPC (primary and reliable).
+# Communication: File-based IPC.
 # Protocol: JSON lines -- one JSON object per line.
-#
-# IMPORTANT: FL Studio's Python is limited:
-#   - No pip packages
-#   - Restricted stdlib
-#   - Must never block the main thread
 
 import json
 import sys
 import os
 import time
-
-print("=" * 40)
-print("DAWMind Script: Lade Python-Modul...")
-print("=" * 40)
-
-# Add the script directory to sys.path so we can import ipc_handler
-_script_dir = os.path.dirname(os.path.abspath(__file__))
-if _script_dir not in sys.path:
-    sys.path.insert(0, _script_dir)
-
-import ipc_handler
 
 # FL Studio modules (only available inside FL Studio's interpreter)
 try:
@@ -40,10 +22,25 @@ try:
     import ui
     import device
     import general
+    _IN_FL_STUDIO = True
 except ImportError:
     # Running outside FL Studio (e.g. for testing) -- create stubs
     mixer = channels = plugins = transport = None
     playlist = patterns = ui = device = general = None
+    _IN_FL_STUDIO = False
+
+# Import IPC handler from same directory
+# Use try/except so FL Studio still shows the script even if ipc_handler
+# has an error -- otherwise the script silently vanishes from the list.
+try:
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    if _script_dir not in sys.path:
+        sys.path.insert(0, _script_dir)
+    import ipc_handler
+    _IPC_AVAILABLE = True
+except Exception as _ipc_err:
+    ipc_handler = None
+    _IPC_AVAILABLE = False
 
 # Globals
 _ipc = None
@@ -54,11 +51,18 @@ _STATE_INTERVAL = 0.5  # seconds
 def OnInit():
     """Called when the script is loaded by FL Studio."""
     global _ipc
+    print("[DAWMind] OnInit called")
+    print("[DAWMind] Python version: %s" % sys.version)
+    print("[DAWMind] IPC module available: %s" % _IPC_AVAILABLE)
+    if not _IPC_AVAILABLE:
+        print("[DAWMind] ERROR: ipc_handler failed to import: %s" % str(_ipc_err))
+        print("[DAWMind] Script dir: %s" % os.path.dirname(os.path.abspath(__file__)))
+        return
     try:
         _ipc = ipc_handler.create_ipc()
-        _log("DAWMind IPC initialized")
+        _log("IPC initialized successfully")
         _log("IPC directory: %s" % getattr(_ipc, "ipc_dir", "unknown"))
-        _log("Script directory: %s" % _script_dir)
+        _log("Script directory: %s" % os.path.dirname(os.path.abspath(__file__)))
     except Exception as exc:
         _log("ERROR: IPC initialization failed: %s" % exc)
         _ipc = None
