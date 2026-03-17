@@ -1,0 +1,14 @@
+# Default behavior
+* text=auto
+
+# FL Studio scripts must have CRLF on Windows checkout
+# FL Studio's Python interpreter runs on Windows only
+fl_script/*.py text eol=crlf
+fl_script/**/*.py text eol=crlf
+
+# Batch files always CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Shell scripts always LF
+*.sh text eol=lf
