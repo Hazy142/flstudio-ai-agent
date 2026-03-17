@@ -1,9 +1,12 @@
-"""Bridge Server – WebSocket ↔ FL Studio IPC bridge.
+"""Bridge Server -- WebSocket <-> FL Studio IPC bridge.
 
 Exposes a FastAPI application with:
 - WebSocket endpoint for real-time bidirectional communication
-- REST endpoints for health checks and state queries
-- Background task that reads FL Studio state via IPC and broadcasts to clients
+- REST endpoints for health checks, state queries, and IPC diagnostics
+- Background task that reads FL Studio state via file-based IPC and broadcasts to clients
+
+IPC is entirely file-based for reliability.  Named Pipes may be re-added
+as an optional optimisation in a future release.
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ import asyncio
 import json
 import logging
 import os
-import sys
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -28,6 +31,14 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _IPC_DIR = os.path.join(os.environ.get("TEMP", "/tmp"), "dawmind_ipc")
+
+# Heartbeat is considered fresh if updated within this many seconds.
+_HEARTBEAT_MAX_AGE_SECONDS = 5.0
+
+
+def _get_ipc_dir() -> str:
+    """Return the IPC directory path."""
+    return _IPC_DIR
 
 
 def _ensure_ipc_dir() -> None:
@@ -73,104 +84,52 @@ def _read_state_from_file() -> dict | None:
         return None
 
 
-# ---------------------------------------------------------------------------
-# Named Pipe server (Windows)
-# ---------------------------------------------------------------------------
-
-
-class NamedPipeServer:
-    """Async Named Pipe server for Windows.
-
-    Falls back to file-based IPC on non-Windows platforms.
-    """
-
-    def __init__(self, pipe_name: str = "dawmind"):
-        self._pipe_name = pipe_name
-        self._pipe_path = rf"\\.\pipe\{pipe_name}"
-        self._handle = None
-        self._connected = False
-        self._use_file_fallback = sys.platform != "win32"
-        self._buffer = ""
-
-    async def start(self) -> None:
-        """Create and listen on the named pipe."""
-        if self._use_file_fallback:
-            _ensure_ipc_dir()
-            logger.info("Using file-based IPC at %s", _IPC_DIR)
-            return
-
-        try:
-            import ctypes
-
-            pipe_access_duplex = 0x00000003
-            pipe_type_byte = 0x00000000
-            pipe_readmode_byte = 0x00000000
-            pipe_nowait = 0x00000001
-            nmpwait_default = 0x00000000
-
-            kernel32 = ctypes.windll.kernel32
-            self._handle = kernel32.CreateNamedPipeW(
-                self._pipe_path,
-                pipe_access_duplex,
-                pipe_type_byte | pipe_readmode_byte | pipe_nowait,
-                1,  # max instances
-                4096,  # out buffer
-                4096,  # in buffer
-                nmpwait_default,
-                None,
-            )
-            if self._handle == -1:
-                logger.warning("Failed to create named pipe, falling back to file IPC")
-                self._use_file_fallback = True
-                _ensure_ipc_dir()
-            else:
-                logger.info("Named Pipe server listening on %s", self._pipe_path)
-        except Exception as exc:
-            logger.warning("Named pipe creation failed (%s), using file IPC", exc)
-            self._use_file_fallback = True
-            _ensure_ipc_dir()
-
-    async def send_command(self, cmd: Command) -> None:
-        """Send a command to FL Studio."""
-        if self._use_file_fallback:
-            await asyncio.to_thread(_send_command_via_file, cmd)
-            return
-
-        data = cmd.to_json_line().encode("utf-8")
-        try:
-            import ctypes
-            import ctypes.wintypes
-
-            written = ctypes.wintypes.DWORD(0)
-            ctypes.windll.kernel32.WriteFile(
-                self._handle, data, len(data), ctypes.byref(written), None
-            )
-        except Exception as exc:
-            logger.error("Pipe write failed: %s", exc)
-
-    async def read_responses(self) -> list[dict]:
-        """Read pending responses from FL Studio."""
-        if self._use_file_fallback:
-            return await asyncio.to_thread(_read_responses_from_file)
-        # Named pipe reading would go here
-        return []
-
-    async def read_state(self) -> dict | None:
-        """Read the latest state from FL Studio."""
-        if self._use_file_fallback:
-            return await asyncio.to_thread(_read_state_from_file)
+def _read_heartbeat() -> float | None:
+    """Read the heartbeat timestamp.  Returns None if missing or unreadable."""
+    path = os.path.join(_IPC_DIR, "heartbeat")
+    try:
+        with open(path) as f:
+            return float(f.read().strip())
+    except (FileNotFoundError, ValueError, OSError):
         return None
 
-    async def stop(self) -> None:
-        """Close the pipe."""
-        if self._handle is not None:
-            try:
-                import ctypes
 
-                ctypes.windll.kernel32.CloseHandle(self._handle)
-            except Exception:
-                pass
-            self._handle = None
+def _is_heartbeat_fresh() -> bool:
+    """Return True if the heartbeat file was updated recently."""
+    ts = _read_heartbeat()
+    if ts is None:
+        return False
+    return (time.time() - ts) < _HEARTBEAT_MAX_AGE_SECONDS
+
+
+def _get_ipc_info() -> dict:
+    """Gather diagnostic information about the IPC directory."""
+    info: dict = {
+        "ipc_dir": _IPC_DIR,
+        "ipc_dir_exists": os.path.isdir(_IPC_DIR),
+        "files": [],
+        "heartbeat_ts": None,
+        "heartbeat_age_seconds": None,
+        "heartbeat_fresh": False,
+        "state_exists": False,
+        "commands_exists": False,
+        "responses_exists": False,
+    }
+    if info["ipc_dir_exists"]:
+        try:
+            info["files"] = sorted(os.listdir(_IPC_DIR))
+        except OSError:
+            pass
+        info["state_exists"] = os.path.isfile(os.path.join(_IPC_DIR, "state.json"))
+        info["commands_exists"] = os.path.isfile(os.path.join(_IPC_DIR, "commands.jsonl"))
+        info["responses_exists"] = os.path.isfile(os.path.join(_IPC_DIR, "responses.jsonl"))
+
+        ts = _read_heartbeat()
+        if ts is not None:
+            info["heartbeat_ts"] = ts
+            info["heartbeat_age_seconds"] = round(time.time() - ts, 2)
+            info["heartbeat_fresh"] = (time.time() - ts) < _HEARTBEAT_MAX_AGE_SECONDS
+    return info
 
 
 # ---------------------------------------------------------------------------
@@ -182,11 +141,11 @@ class BridgeState:
     """Shared state for the bridge server."""
 
     def __init__(self) -> None:
-        self.pipe = NamedPipeServer()
         self.clients: list[WebSocket] = []
         self.daw_state: dict = {}
         self.pending_responses: dict[str, asyncio.Future] = {}
         self.config: DAWMindConfig = load_config()
+        self.fl_studio_connected: bool = False
 
 
 bridge_state = BridgeState()
@@ -196,7 +155,8 @@ bridge_state = BridgeState()
 async def lifespan(app: FastAPI):
     """Manage bridge server lifecycle."""
     logger.info("Starting DAWMind Bridge Server")
-    await bridge_state.pipe.start()
+    _ensure_ipc_dir()
+    logger.info("Using file-based IPC at %s", _IPC_DIR)
 
     # Start background state polling
     poll_task = asyncio.create_task(_state_poll_loop())
@@ -204,7 +164,6 @@ async def lifespan(app: FastAPI):
     yield
 
     poll_task.cancel()
-    await bridge_state.pipe.stop()
     logger.info("Bridge Server stopped")
 
 
@@ -217,7 +176,7 @@ async def health() -> JSONResponse:
     return JSONResponse(
         {
             "status": "ok",
-            "fl_studio_connected": bool(bridge_state.daw_state),
+            "fl_studio_connected": bridge_state.fl_studio_connected,
             "connected_clients": len(bridge_state.clients),
         }
     )
@@ -227,6 +186,14 @@ async def health() -> JSONResponse:
 async def get_state() -> JSONResponse:
     """Return the latest DAW state snapshot."""
     return JSONResponse(bridge_state.daw_state or {"error": "No state available"})
+
+
+@app.get("/api/ipc-info")
+async def ipc_info() -> JSONResponse:
+    """Return diagnostic information about the IPC layer."""
+    info = await asyncio.to_thread(_get_ipc_info)
+    info["fl_studio_connected"] = bridge_state.fl_studio_connected
+    return JSONResponse(info)
 
 
 @app.websocket("/ws")
@@ -253,7 +220,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             future: asyncio.Future = asyncio.get_event_loop().create_future()
             bridge_state.pending_responses[cmd.id] = future
 
-            await bridge_state.pipe.send_command(cmd)
+            await asyncio.to_thread(_send_command_via_file, cmd)
 
             # Wait for response with timeout
             try:
@@ -279,8 +246,11 @@ async def _state_poll_loop() -> None:
 
     while True:
         try:
+            # Check heartbeat for connection status
+            bridge_state.fl_studio_connected = await asyncio.to_thread(_is_heartbeat_fresh)
+
             # Read state from IPC
-            state = await bridge_state.pipe.read_state()
+            state = await asyncio.to_thread(_read_state_from_file)
             if state:
                 bridge_state.daw_state = state
 
@@ -296,7 +266,7 @@ async def _state_poll_loop() -> None:
                     bridge_state.clients.remove(client)
 
             # Also check for command responses
-            responses = await bridge_state.pipe.read_responses()
+            responses = await asyncio.to_thread(_read_responses_from_file)
             for resp in responses:
                 cmd_id = resp.get("id", "")
                 future = bridge_state.pending_responses.get(cmd_id)

@@ -5,8 +5,8 @@
 # This script runs inside FL Studio's Python interpreter and exposes
 # the internal API to the DAWMind bridge server via IPC.
 #
-# Communication: Named Pipe (preferred) or file-based IPC (fallback).
-# Protocol: JSON lines – one JSON object per line.
+# Communication: File-based IPC (primary and reliable).
+# Protocol: JSON lines -- one JSON object per line.
 #
 # IMPORTANT: FL Studio's Python is limited:
 #   - No pip packages
@@ -41,7 +41,7 @@ try:
     import device
     import general
 except ImportError:
-    # Running outside FL Studio (e.g. for testing) – create stubs
+    # Running outside FL Studio (e.g. for testing) -- create stubs
     mixer = channels = plugins = transport = None
     playlist = patterns = ui = device = general = None
 
@@ -54,8 +54,14 @@ _STATE_INTERVAL = 0.5  # seconds
 def OnInit():
     """Called when the script is loaded by FL Studio."""
     global _ipc
-    _ipc = ipc_handler.create_ipc()
-    _log("DAWMind IPC initialized")
+    try:
+        _ipc = ipc_handler.create_ipc()
+        _log("DAWMind IPC initialized")
+        _log("IPC directory: %s" % getattr(_ipc, "ipc_dir", "unknown"))
+        _log("Script directory: %s" % _script_dir)
+    except Exception as exc:
+        _log("ERROR: IPC initialization failed: %s" % exc)
+        _ipc = None
 
 
 def OnDeInit():
@@ -75,11 +81,28 @@ def OnIdle():
         return
 
     # Process all pending commands
-    commands = _ipc.read_commands()
+    try:
+        commands = _ipc.read_commands()
+    except Exception as exc:
+        _log("ERROR reading commands: %s" % exc)
+        commands = []
+
     for cmd in commands:
-        response = _handle_command(cmd)
-        if response:
-            _ipc.write_response(response)
+        try:
+            response = _handle_command(cmd)
+            if response:
+                _ipc.write_response(response)
+        except Exception as exc:
+            _log("ERROR handling command %s: %s" % (cmd.get("action", "?"), exc))
+            # Try to send error response
+            try:
+                _ipc.write_response({
+                    "id": cmd.get("id", ""),
+                    "status": "error",
+                    "error": str(exc),
+                })
+            except Exception:
+                pass
 
     # Periodic state broadcast
     now = time.time()
@@ -123,6 +146,7 @@ def _handle_command(cmd):
         result = _dispatch(module, action, params)
         return {"id": cmd_id, "status": "ok", "result": result}
     except Exception as e:
+        _log("Command error (%s.%s): %s" % (module, action, e))
         return {"id": cmd_id, "status": "error", "error": str(e)}
 
 
@@ -373,8 +397,8 @@ def _push_state():
     try:
         state = _build_full_state()
         _ipc.write_state(state)
-    except Exception:
-        pass
+    except Exception as exc:
+        _log("ERROR pushing state: %s" % exc)
 
 
 def _log(msg):

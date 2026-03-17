@@ -93,8 +93,6 @@ async def bridge_server(ipc_dir):
 
     # Reset global bridge state to avoid leaking between tests
     bs_module.bridge_state = bs_module.BridgeState()
-    # Also patch the pipe to use our IPC dir
-    bs_module.bridge_state.pipe._use_file_fallback = True
 
     host = "127.0.0.1"
     port = _free_port()

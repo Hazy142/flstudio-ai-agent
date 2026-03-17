@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import tempfile
+import time
 from dataclasses import dataclass, field
 
 # ---------------------------------------------------------------------------
@@ -385,7 +386,7 @@ class MockFLStudio:
             f.write(json.dumps(response) + "\n")
 
     def _write_state(self) -> None:
-        """Write current state to state.json (atomic-ish)."""
+        """Write current state to state.json (atomic-ish) and update heartbeat."""
         path = os.path.join(self.ipc_dir, "state.json")
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
@@ -393,6 +394,10 @@ class MockFLStudio:
         if os.path.exists(path):
             os.remove(path)
         os.rename(tmp, path)
+        # Write heartbeat so the bridge detects us as connected
+        heartbeat_path = os.path.join(self.ipc_dir, "heartbeat")
+        with open(heartbeat_path, "w") as f:
+            f.write(str(time.time()))
 
     # -- Command dispatch --
 
